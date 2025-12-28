@@ -31,12 +31,18 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
 
     client = discord.Client(intents=intents)
     tree = app_commands.CommandTree(client)
+    guild_obj = discord.Object(id=config.guild_id)
 
     async def _is_admin(interaction: discord.Interaction) -> bool:
         member = interaction.user if isinstance(interaction.user, discord.Member) else None
         return bool(member and (member.guild_permissions.administrator or member.guild_permissions.manage_guild))
 
-    @tree.command(name="add_more_energy", description="Add Ollama API keys to Firestore (comma separated)")
+    # Guild-scoped so it shows up immediately in the server (no global propagation delay).
+    @tree.command(
+        name="add_more_energy",
+        description="Add Ollama API keys to Firestore (comma separated)",
+        guild=guild_obj,
+    )
     @app_commands.describe(keys="Comma separated API keys")
     async def add_more_energy(interaction: discord.Interaction, keys: str):
         # Only allow in the configured energy channel.
@@ -69,13 +75,49 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
             ephemeral=True,
         )
 
+    @tree.command(name="submit_energy", description="Submit your Ollama API keys via DM (comma separated)")
+    @app_commands.describe(keys="Comma separated API keys")
+    async def submit_energy(interaction: discord.Interaction, keys: str):
+        # This is intended for DMs; in guilds, direct users to the energy channel.
+        if interaction.guild is not None:
+            await interaction.response.send_message(
+                "Please DM me this command, or ask an admin to use /add_more_energy in the energy channel.",
+                ephemeral=True,
+            )
+            return
+
+        new_keys = _parse_keys_arg(keys)
+        if not new_keys:
+            await interaction.response.send_message("No keys provided.")
+            return
+
+        stats = await asyncio.to_thread(
+            key_store.add_api_keys,
+            new_keys=new_keys,
+            added_by_id=interaction.user.id,
+            added_by_name=str(interaction.user),
+            source="dm",
+        )
+
+        await interaction.response.send_message(
+            f"Thanks. Stored {stats.get('added', 0)} key(s) (skipped {stats.get('skipped', 0)} duplicate(s))."
+        )
+
     @client.event
     async def on_ready():
-        guild = discord.Object(id=config.guild_id)
         try:
-            await tree.sync(guild=guild)
-        except Exception:
-            pass
+            guild_cmds = await tree.sync(guild=guild_obj)
+            print(f"[{bot_name}] Synced {len(guild_cmds)} guild command(s)")
+        except Exception as exc:
+            print(f"[{bot_name}] Guild command sync failed: {type(exc).__name__}: {exc}")
+
+        # Global commands are required for slash commands to appear in DMs.
+        # Note: global propagation can take some time on Discord's side.
+        try:
+            global_cmds = await tree.sync()
+            print(f"[{bot_name}] Synced {len(global_cmds)} global command(s) (DM-capable)")
+        except Exception as exc:
+            print(f"[{bot_name}] Global command sync failed: {type(exc).__name__}: {exc}")
 
         print(f"[{bot_name}] Logged in as {client.user} (guild={config.guild_id})")
 
