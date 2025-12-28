@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import asyncio
+
+import discord
+from discord import app_commands
+
+from .config import load_config
+from .firestore_keys import FirestoreKeyStore
+
+
+def _parse_keys_arg(text: str) -> list[str]:
+    # Accept comma-separated keys, ignoring empties.
+    return [k.strip() for k in text.split(",") if k and k.strip()]
+
+
+async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_TOKEN") -> None:
+    config = load_config(bot_name=bot_name, token_env=token_env)
+
+    key_store = FirestoreKeyStore(
+        credentials_path=config.firebase_credentials_path,
+        collection=config.firestore_collection,
+        doc_id=config.firestore_admin_keys_doc,
+    )
+
+    intents = discord.Intents.default()
+    intents.message_content = True
+    intents.guilds = True
+    intents.messages = True
+    intents.dm_messages = True
+
+    client = discord.Client(intents=intents)
+    tree = app_commands.CommandTree(client)
+
+    async def _is_admin(interaction: discord.Interaction) -> bool:
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        return bool(member and (member.guild_permissions.administrator or member.guild_permissions.manage_guild))
+
+    @tree.command(name="add_more_energy", description="Add Ollama API keys to Firestore (comma separated)")
+    @app_commands.describe(keys="Comma separated API keys")
+    async def add_more_energy(interaction: discord.Interaction, keys: str):
+        # Only allow in the configured energy channel.
+        if interaction.channel_id != config.energy_channel_id:
+            await interaction.response.send_message(
+                "This command can only be used in the configured energy channel.",
+                ephemeral=True,
+            )
+            return
+
+        if not await _is_admin(interaction):
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        new_keys = _parse_keys_arg(keys)
+        if not new_keys:
+            await interaction.response.send_message("No keys provided.", ephemeral=True)
+            return
+
+        stats = await asyncio.to_thread(
+            key_store.add_api_keys,
+            new_keys=new_keys,
+            added_by_id=interaction.user.id,
+            added_by_name=str(interaction.user),
+            source="guild",
+        )
+
+        await interaction.response.send_message(
+            f"Stored {stats.get('added', 0)} key(s) (skipped {stats.get('skipped', 0)} duplicate(s)). Total keys now: {stats.get('total', 0)}.",
+            ephemeral=True,
+        )
+
+    @client.event
+    async def on_ready():
+        guild = discord.Object(id=config.guild_id)
+        try:
+            await tree.sync(guild=guild)
+        except Exception:
+            pass
+
+        print(f"[{bot_name}] Logged in as {client.user} (guild={config.guild_id})")
+
+    @client.event
+    async def on_message(message: discord.Message):
+        # Utility-only bot: only reacts to DMs for user submissions.
+        if message.author.bot:
+            return
+
+        if message.guild is not None:
+            return
+
+        content = (message.content or "").strip()
+        if not content:
+            return
+
+        # DM command formats supported:
+        # - add_more_energy key1,key2,key3
+        # - /add_more_energy key1,key2,key3
+        lowered = content.lower()
+        if lowered.startswith("add_more_energy"):
+            rest = content[len("add_more_energy") :].strip()
+        elif lowered.startswith("/add_more_energy"):
+            rest = content[len("/add_more_energy") :].strip()
+        else:
+            return
+
+        new_keys = _parse_keys_arg(rest)
+        if not new_keys:
+            await message.channel.send("Send keys like: add_more_energy key1,key2,key3")
+            return
+
+        stats = await asyncio.to_thread(
+            key_store.add_api_keys,
+            new_keys=new_keys,
+            added_by_id=message.author.id,
+            added_by_name=str(message.author),
+            source="dm",
+        )
+
+        await message.channel.send(
+            f"Thanks. Stored {stats.get('added', 0)} key(s) (skipped {stats.get('skipped', 0)} duplicate(s))."
+        )
+
+    await client.start(config.discord_token)
+
+
+def main(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_TOKEN") -> None:
+    asyncio.run(run_admin_bot(bot_name=bot_name, token_env=token_env))

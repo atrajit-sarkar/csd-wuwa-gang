@@ -26,10 +26,32 @@ def main() -> int:
     env = os.environ.copy()
 
     for bot in bots:
+        bot_type = (bot.get("type") or "character").strip().lower() if isinstance(bot.get("type"), str) else "character"
         name = bot.get("name")
-        character = bot.get("character")
         token_env = bot.get("token_env") or "BOT_TOKEN"
-        if not name or not character:
+        if not name:
+            continue
+
+        if bot_type == "admin":
+            print(f"Starting admin bot: {name}")
+            procs.append(
+                subprocess.Popen(
+                    [
+                        python_exe,
+                        str(root / "run_admin.py"),
+                        "--bot-name",
+                        str(name),
+                        "--token-env",
+                        str(token_env),
+                    ],
+                    cwd=str(root),
+                    env=env,
+                )
+            )
+            continue
+
+        character = bot.get("character")
+        if not character:
             continue
 
         print(f"Starting bot: {name} ({character})")

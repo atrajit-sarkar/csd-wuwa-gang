@@ -88,40 +88,6 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         )
         return resp.content
 
-    @tree.command(name="add_more_energy", description="Add Ollama API keys (comma separated)")
-    @app_commands.describe(keys="Comma separated API keys")
-    async def add_more_energy(interaction: discord.Interaction, keys: str):
-        # Only allow in the ENERGY channel.
-        if interaction.channel_id != config.energy_channel_id:
-            await interaction.response.send_message(
-                "This command can only be used in the configured energy channel.",
-                ephemeral=True,
-            )
-            return
-
-        # Admin-only (as requested).
-        member = interaction.user if isinstance(interaction.user, discord.Member) else None
-        if not member or not (member.guild_permissions.administrator or member.guild_permissions.manage_guild):
-            await interaction.response.send_message("Admins only.", ephemeral=True)
-            return
-
-        new_keys = [k.strip() for k in keys.split(",") if k.strip()]
-        if not new_keys:
-            await interaction.response.send_message("No keys provided.", ephemeral=True)
-            return
-
-        stats = await asyncio.to_thread(
-            key_store.add_api_keys,
-            new_keys=new_keys,
-            added_by_id=interaction.user.id,
-            added_by_name=str(interaction.user),
-            source="guild",
-        )
-        await interaction.response.send_message(
-            f"Stored {stats.get('added', 0)} key(s) to Firestore (skipped {stats.get('skipped', 0)} duplicate(s)). Total keys now: {stats.get('total', 0)}.",
-            ephemeral=True,
-        )
-
     @client.event
     async def on_ready():
         # Sync commands to the configured guild for fast availability.

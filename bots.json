@@ -1,6 +1,11 @@
 {
   "bots": [
     {
+      "type": "admin",
+      "name": "Admin",
+      "token_env": "ADMIN_BOT_TOKEN"
+    },
+    {
       "name": "Linae",
       "character": "Lynae",
       "token_env": "LINAE_BOT_TOKEN"
