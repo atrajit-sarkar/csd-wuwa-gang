@@ -38,7 +38,9 @@ def main() -> int:
                 subprocess.Popen(
                     [
                         python_exe,
-                        str(root / "run_admin.py"),
+                        str(root / "run_bot.py"),
+                        "--type",
+                        "admin",
                         "--bot-name",
                         str(name),
                         "--token-env",
@@ -60,6 +62,8 @@ def main() -> int:
                 [
                     python_exe,
                     str(root / "run_bot.py"),
+                    "--type",
+                    "character",
                     "--bot-name",
                     str(name),
                     "--character-name",

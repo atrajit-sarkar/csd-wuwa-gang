@@ -15,7 +15,11 @@
 
 ## Run Linae bot
 
-- `python run_bot.py --bot-name Linae --character-name Lynae --token-env LINAE_BOT_TOKEN`
+- `python run_bot.py --type character --bot-name Linae --character-name Lynae --token-env LINAE_BOT_TOKEN`
+
+## Run Admin bot
+
+- `python run_bot.py --type admin --bot-name Admin --token-env ADMIN_BOT_TOKEN`
 
 ## Run all bots (manager)
 
