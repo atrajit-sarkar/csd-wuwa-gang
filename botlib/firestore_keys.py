@@ -118,3 +118,55 @@ class FirestoreKeyStore:
 
         total = len(self.list_api_keys())
         return {"added": len(update), "skipped": skipped, "total": total}
+
+    def get_ollama_model(self) -> Optional[str]:
+        """Return the runtime Ollama model override, if configured."""
+
+        snap = self._doc_ref.get()
+        if not snap.exists:
+            return None
+
+        data = snap.to_dict() or {}
+        runtime = data.get("runtime") if isinstance(data, dict) else None
+        if not isinstance(runtime, dict):
+            return None
+
+        model = runtime.get("ollama_model")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+        return None
+
+    def set_ollama_model(self, *, model: str, updated_by_id: int, updated_by_name: str, source: str) -> None:
+        cleaned = (model or "").strip()
+        if not cleaned:
+            raise ValueError("Model must be a non-empty string")
+
+        update: dict[str, Any] = {
+            "runtime.ollama_model": cleaned,
+            "runtime.ollama_model_updated_by": {"id": updated_by_id, "name": updated_by_name},
+            "runtime.ollama_model_updated_at": firestore.SERVER_TIMESTAMP,
+            "runtime.ollama_model_source": source,
+        }
+
+        # Ensure doc exists; set merge also works.
+        self._doc_ref.set({}, merge=True)
+        self._doc_ref.update(update)
+
+    def clear_ollama_model(self, *, cleared_by_id: int, cleared_by_name: str, source: str) -> None:
+        """Remove the runtime Ollama model override.
+
+        After clearing, bots will fall back to their configured default model.
+        """
+
+        update: dict[str, Any] = {
+            "runtime.ollama_model": firestore.DELETE_FIELD,
+            "runtime.ollama_model_updated_by": firestore.DELETE_FIELD,
+            "runtime.ollama_model_updated_at": firestore.DELETE_FIELD,
+            "runtime.ollama_model_source": firestore.DELETE_FIELD,
+            "runtime.ollama_model_cleared_by": {"id": cleared_by_id, "name": cleared_by_name},
+            "runtime.ollama_model_cleared_at": firestore.SERVER_TIMESTAMP,
+            "runtime.ollama_model_cleared_source": source,
+        }
+
+        self._doc_ref.set({}, merge=True)
+        self._doc_ref.update(update)

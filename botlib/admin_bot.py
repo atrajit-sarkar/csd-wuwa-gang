@@ -75,6 +75,113 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
             ephemeral=True,
         )
 
+    @tree.command(
+        name="set_ollama_model",
+        description="Set the Ollama model used by all chatbots",
+        guild=guild_obj,
+    )
+    @app_commands.describe(model="Model name, e.g. llama3.1:70b")
+    async def set_ollama_model(interaction: discord.Interaction, model: str):
+        # Only allow in the configured energy channel.
+        if interaction.channel_id != config.energy_channel_id:
+            await interaction.response.send_message(
+                "This command can only be used in the configured energy channel.",
+                ephemeral=True,
+            )
+            return
+
+        if not await _is_admin(interaction):
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        cleaned = (model or "").strip()
+        if not cleaned:
+            await interaction.response.send_message("Model cannot be empty.", ephemeral=True)
+            return
+
+        try:
+            await asyncio.to_thread(
+                key_store.set_ollama_model,
+                model=cleaned,
+                updated_by_id=interaction.user.id,
+                updated_by_name=str(interaction.user),
+                source="guild",
+            )
+        except Exception as exc:
+            await interaction.response.send_message(
+                f"Failed to set model: {type(exc).__name__}: {exc}",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            f"Updated runtime model for all chatbots to: {cleaned}",
+            ephemeral=True,
+        )
+
+    @tree.command(
+        name="show_ollama_model",
+        description="Show the Ollama model currently used by chatbots",
+        guild=guild_obj,
+    )
+    async def show_ollama_model(interaction: discord.Interaction):
+        # Only allow in the configured energy channel.
+        if interaction.channel_id != config.energy_channel_id:
+            await interaction.response.send_message(
+                "This command can only be used in the configured energy channel.",
+                ephemeral=True,
+            )
+            return
+
+        if not await _is_admin(interaction):
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        runtime_model = await asyncio.to_thread(key_store.get_ollama_model)
+        if runtime_model:
+            msg = f"Runtime override model is set to: {runtime_model}"
+        else:
+            msg = f"No runtime override model set. Chatbots will use default from .env: {config.ollama_model}"
+
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @tree.command(
+        name="clear_ollama_model",
+        description="Clear the runtime Ollama model override (revert to .env default)",
+        guild=guild_obj,
+    )
+    async def clear_ollama_model(interaction: discord.Interaction):
+        # Only allow in the configured energy channel.
+        if interaction.channel_id != config.energy_channel_id:
+            await interaction.response.send_message(
+                "This command can only be used in the configured energy channel.",
+                ephemeral=True,
+            )
+            return
+
+        if not await _is_admin(interaction):
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        try:
+            await asyncio.to_thread(
+                key_store.clear_ollama_model,
+                cleared_by_id=interaction.user.id,
+                cleared_by_name=str(interaction.user),
+                source="guild",
+            )
+        except Exception as exc:
+            await interaction.response.send_message(
+                f"Failed to clear model override: {type(exc).__name__}: {exc}",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            f"Cleared runtime model override. Chatbots will now use default from .env: {config.ollama_model}",
+            ephemeral=True,
+        )
+
     @tree.command(name="submit_energy", description="Submit your Ollama API keys via DM (comma separated)")
     @app_commands.describe(keys="Comma separated API keys")
     async def submit_energy(interaction: discord.Interaction, keys: str):

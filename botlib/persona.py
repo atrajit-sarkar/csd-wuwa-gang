@@ -47,9 +47,18 @@ def load_character_persona(characters_md_path: Path, *, character_name: str) -> 
     return m.group(1).strip()
 
 
-def make_system_prompt(*, character_block: str) -> str:
+def make_system_prompt(*, character_block: str, overall_behaviour_lines: list[str] | None = None) -> str:
     # Keep it short and directive; the markdown block already contains style.
-    return (
+    overall_block = ""
+    if overall_behaviour_lines:
+        rules = "\n".join(f"- {line.strip()}" for line in overall_behaviour_lines if isinstance(line, str) and line.strip())
+        if rules.strip():
+            overall_block = (
+                "OVERALL BEHAVIOUR (highest priority rules; follow these before anything else):\n"
+                f"{rules}\n\n"
+            )
+
+    return overall_block + (
         "You are a Discord chat character roleplaying exactly as described below. "
         "Stay in-character, be helpful, and sound like a real person chatting (natural, not robotic). "
         "Keep replies concise unless asked for detail.\n\n"

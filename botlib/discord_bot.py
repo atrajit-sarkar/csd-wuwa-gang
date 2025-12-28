@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Deque
 import re
+import json
 
 import discord
 from discord import app_commands
@@ -48,6 +49,29 @@ def _normalize_name_trigger(text: str) -> str:
     return t
 
 
+def _load_overall_behaviour_lines(*, root: Path, bot_name: str, character_name: str) -> list[str] | None:
+    path = root / "overall-behaviour.json"
+    if not path.exists():
+        return None
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    candidates = [bot_name.strip().lower(), character_name.strip().lower()]
+    for key in candidates:
+        lines = data.get(key)
+        if isinstance(lines, list):
+            cleaned = [line.strip() for line in lines if isinstance(line, str) and line.strip()]
+            if cleaned:
+                return cleaned
+    return None
+
+
 async def run_character_bot(*, bot_name: str, character_name: str, token_env: str = "BOT_TOKEN") -> None:
     cfg = BotConfig  # for type checkers
 
@@ -62,7 +86,13 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
 
     characters_md_path = Path(__file__).resolve().parents[1] / "characters.md"
     character_block = load_character_persona(characters_md_path, character_name=character_name)
-    system_prompt = make_system_prompt(character_block=character_block)
+    root = Path(__file__).resolve().parents[1]
+    overall_behaviour_lines = _load_overall_behaviour_lines(
+        root=root,
+        bot_name=bot_name,
+        character_name=character_name,
+    )
+    system_prompt = make_system_prompt(character_block=character_block, overall_behaviour_lines=overall_behaviour_lines)
 
     intents = discord.Intents.default()
     intents.message_content = True
@@ -80,9 +110,12 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         if not api_keys:
             raise RuntimeError("No Ollama API keys configured in Firestore")
 
+        runtime_model = await asyncio.to_thread(key_store.get_ollama_model)
+        model = runtime_model or config.ollama_model
+
         resp = await chat_with_key_rotation(
             api_url=config.ollama_api_url,
-            model=config.ollama_model,
+            model=model,
             messages=messages,
             api_keys=api_keys,
         )
