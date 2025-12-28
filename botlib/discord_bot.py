@@ -17,12 +17,15 @@ from .firestore_keys import FirestoreKeyStore
 from .ollama_client import chat_with_key_rotation
 from .persona import load_character_persona, make_system_prompt
 from .user_profiles import FirestoreUserProfileStore
+from .channel_memory import FirestoreChannelMemoryStore
 
 
 @dataclass
 class BotRuntime:
     channel_history: dict[int, Deque[dict[str, str]]]
     user_last_profile_update_s: dict[int, float]
+    channel_summarizing: set[int]
+    channel_last_summarize_attempt_s: dict[int, float]
 
 
 def _is_reply_to_me(message: discord.Message, my_user_id: int) -> bool:
@@ -55,6 +58,12 @@ def _normalize_name_trigger(text: str) -> str:
 _BASE_HISTORY_DEPTH = 20  # always try to provide ~12-20 messages of context
 _DEEP_HISTORY_LIMIT = 140  # when user asks for older context
 _MAX_CONTEXT_MESSAGES = 60  # cap to avoid runaway context size
+
+_FS_RECENT_LIMIT = 40  # persisted recent window used every request
+_FS_DEEP_LIMIT = 160  # deeper persisted window when user asks for older context
+_FS_SUMMARY_TRIGGER = 220  # summarize+compact when stored recent docs exceed this
+_FS_SUMMARY_KEEP_LAST = 60  # keep this many message docs after compaction
+_FS_SUMMARIZE_DEBOUNCE_S = 75.0
 
 
 def _needs_deeper_history(user_message: str) -> bool:
@@ -227,6 +236,11 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         collection=config.firestore_collection,
     )
 
+    channel_memory_store = FirestoreChannelMemoryStore(
+        credentials_path=config.firebase_credentials_path,
+        collection=config.firestore_collection,
+    )
+
     characters_md_path = Path(__file__).resolve().parents[1] / "characters.md"
     character_block = load_character_persona(characters_md_path, character_name=character_name)
     root = Path(__file__).resolve().parents[1]
@@ -248,6 +262,8 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
     runtime = BotRuntime(
         channel_history=defaultdict(lambda: deque(maxlen=30)),
         user_last_profile_update_s={},
+        channel_summarizing=set(),
+        channel_last_summarize_attempt_s={},
     )
 
     async def ollama_chat(messages: list[dict[str, str]]) -> str:
@@ -267,6 +283,79 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         )
         return resp.content
 
+    async def maybe_resummarize_channel_memory(*, guild_id: int, channel_id: int) -> None:
+        now = time.monotonic()
+        last_try = runtime.channel_last_summarize_attempt_s.get(channel_id, 0.0)
+        if (now - last_try) < _FS_SUMMARIZE_DEBOUNCE_S:
+            return
+        runtime.channel_last_summarize_attempt_s[channel_id] = now
+
+        if channel_id in runtime.channel_summarizing:
+            return
+        runtime.channel_summarizing.add(channel_id)
+
+        try:
+            ids = await asyncio.to_thread(
+                channel_memory_store.list_recent_message_ids,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                limit=500,
+            )
+            if len(ids) < _FS_SUMMARY_TRIGGER:
+                return
+
+            recent_msgs = await asyncio.to_thread(
+                channel_memory_store.get_recent_messages_for_summary,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                limit=min(len(ids), 220),
+            )
+
+            existing = await asyncio.to_thread(
+                channel_memory_store.get_memory,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                recent_limit=0,
+            )
+            existing_summary = (existing.summary if existing else "").strip()
+
+            summarizer_system = (
+                "You are a professional conversation summarizer. "
+                "Maintain a compact CHANNEL MEMORY SUMMARY for future replies. "
+                "Write plain text. Be factual and concise. "
+                "Do NOT include personal sensitive data (addresses, phone numbers, secrets, tokens). "
+                "Do NOT output message-by-message logs. "
+                "Capture: ongoing topics, decisions, preferences (general), important facts, unresolved questions. "
+                "Keep under 2500 characters."
+            )
+
+            prompt_msgs: list[dict[str, str]] = [
+                {"role": "system", "content": summarizer_system},
+            ]
+            if existing_summary:
+                prompt_msgs.append({"role": "user", "content": f"Existing summary:\n{existing_summary}"})
+            prompt_msgs.append({"role": "user", "content": "New chat to incorporate (chronological):"})
+            prompt_msgs.extend(recent_msgs)
+            prompt_msgs.append({"role": "user", "content": "Return the updated summary only."})
+
+            new_summary = await ollama_chat(prompt_msgs)
+            new_summary = (new_summary or "").strip()
+            if not new_summary:
+                return
+
+            keep_ids = ids[-_FS_SUMMARY_KEEP_LAST:]
+            await asyncio.to_thread(
+                channel_memory_store.set_summary_and_compact,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                new_summary=new_summary,
+                keep_last_message_ids=keep_ids,
+            )
+        except Exception:
+            return
+        finally:
+            runtime.channel_summarizing.discard(channel_id)
+
     @client.event
     async def on_ready():
         # Sync commands to the configured guild for fast availability.
@@ -281,12 +370,31 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
 
     @client.event
     async def on_message(message: discord.Message):
-        # Ignore bots and ourselves.
-        if message.author.bot:
-            return
+        # Only operate inside configured guild + target channel.
         if not message.guild or message.guild.id != config.guild_id:
             return
         if message.channel.id != config.target_channel_id:
+            return
+
+        # Persist channel chat into Firestore memory (store BOTH user+bot messages).
+        try:
+            await asyncio.to_thread(
+                channel_memory_store.append_message,
+                guild_id=message.guild.id,
+                channel_id=message.channel.id,
+                message_id=message.id,
+                author_id=message.author.id,
+                author_is_bot=bool(message.author.bot),
+                content=message.content,
+            )
+        except Exception:
+            pass
+
+        # Background: keep channel memory compact and up-to-date.
+        asyncio.create_task(maybe_resummarize_channel_memory(guild_id=message.guild.id, channel_id=message.channel.id))
+
+        # Never respond to bot-authored messages.
+        if message.author.bot:
             return
 
         # Learn lightweight per-user behaviour (rate limited to reduce Firestore writes).
@@ -351,6 +459,30 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
 
                 context: list[dict[str, str]] = in_memory_context[-desired_depth:]
 
+                fs_memory = None
+                try:
+                    fs_memory = await asyncio.to_thread(
+                        channel_memory_store.get_memory,
+                        guild_id=message.guild.id,
+                        channel_id=message.channel.id,
+                        recent_limit=_FS_DEEP_LIMIT if needs_deep else _FS_RECENT_LIMIT,
+                    )
+                except Exception:
+                    fs_memory = None
+
+                if fs_memory and fs_memory.recent_messages:
+                    # Filter out the current message if it appears in the persisted window.
+                    filtered: list[dict[str, str]] = []
+                    for m in fs_memory.recent_messages:
+                        if isinstance(m, dict) and m.get("message_id") == message.id:
+                            continue
+                        role = m.get("role")
+                        content = m.get("content")
+                        if isinstance(role, str) and isinstance(content, str) and content.strip():
+                            filtered.append({"role": role, "content": content.strip()})
+                    if filtered:
+                        context = filtered[-_MAX_CONTEXT_MESSAGES:]
+
                 if needs_deep or len(context) < desired_depth:
                     fetch_limit = _DEEP_HISTORY_LIMIT if needs_deep else desired_depth
                     fetched = await _fetch_channel_history(channel=message.channel, before=message, limit=fetch_limit)
@@ -385,6 +517,17 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                         context = fetched_chat[-desired_depth:]
 
                 messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+
+                if fs_memory and fs_memory.summary:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "CHANNEL MEMORY SUMMARY (use for long-term continuity; do not mention explicitly):\n"
+                                f"{fs_memory.summary}"
+                            ),
+                        }
+                    )
                 if user_profile_summary and user_profile_summary.summary:
                     messages.append(
                         {
