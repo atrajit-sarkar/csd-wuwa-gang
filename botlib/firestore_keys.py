@@ -88,10 +88,21 @@ class FirestoreKeyStore:
         if not cleaned:
             return {"added": 0, "skipped": 0, "total": len(self.list_api_keys())}
 
-        # Build update payload with deterministic IDs so duplicates overwrite same entry.
+        # Read existing keys once so we can skip true duplicates.
+        existing_snap = self._doc_ref.get()
+        existing_data = existing_snap.to_dict() if existing_snap.exists else {}
+        existing_keys = existing_data.get("keys") if isinstance(existing_data, dict) else None
+        existing_key_ids: set[str] = set(existing_keys.keys()) if isinstance(existing_keys, dict) else set()
+
+        # Build update payload with deterministic IDs.
+        # If the ID already exists, skip (prevents needless rewrites and duplicates).
         update: dict[str, Any] = {}
+        skipped = 0
         for api_key in cleaned:
             kid = _sha256_hex(api_key)[:24]
+            if kid in existing_key_ids:
+                skipped += 1
+                continue
             update[f"keys.{kid}"] = {
                 "api_key": api_key,
                 "key_id": kid,
@@ -100,9 +111,10 @@ class FirestoreKeyStore:
                 "source": source,
             }
 
-        # Ensure doc exists; set merge also works.
-        self._doc_ref.set({}, merge=True)
-        self._doc_ref.update(update)
+        if update:
+            # Ensure doc exists; set merge also works.
+            self._doc_ref.set({}, merge=True)
+            self._doc_ref.update(update)
 
         total = len(self.list_api_keys())
-        return {"added": len(update), "skipped": 0, "total": total}
+        return {"added": len(update), "skipped": skipped, "total": total}

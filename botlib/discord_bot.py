@@ -11,8 +11,7 @@ import discord
 from discord import app_commands
 
 from .config import BotConfig
-from .env_store import add_api_keys
-from .keyring import KeyRing
+from .firestore_keys import FirestoreKeyStore
 from .ollama_client import chat_with_key_rotation
 from .persona import load_character_persona, make_system_prompt
 
@@ -55,7 +54,11 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
     from .config import load_config
 
     config = load_config(bot_name=bot_name, token_env=token_env)
-    keyring = KeyRing.from_env(config.env_path)
+    key_store = FirestoreKeyStore(
+        credentials_path=config.firebase_credentials_path,
+        collection=config.firestore_collection,
+        doc_id=config.firestore_admin_keys_doc,
+    )
 
     characters_md_path = Path(__file__).resolve().parents[1] / "characters.md"
     character_block = load_character_persona(characters_md_path, character_name=character_name)
@@ -72,17 +75,16 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
     runtime = BotRuntime(channel_history=defaultdict(lambda: deque(maxlen=30)))
 
     async def ollama_chat(messages: list[dict[str, str]]) -> str:
-        # Reload keys each call so `/add_more_energy` takes effect immediately.
-        nonlocal keyring
-        keyring = KeyRing.from_env(config.env_path)
-        if keyring.is_empty():
-            raise RuntimeError("No Ollama API keys configured")
+        # Reload keys each call so additions take effect immediately.
+        api_keys = await asyncio.to_thread(key_store.list_api_keys)
+        if not api_keys:
+            raise RuntimeError("No Ollama API keys configured in Firestore")
 
         resp = await chat_with_key_rotation(
             api_url=config.ollama_api_url,
             model=config.ollama_model,
             messages=messages,
-            api_keys=keyring.iter_keys(),
+            api_keys=api_keys,
         )
         return resp.content
 
@@ -97,14 +99,26 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
             )
             return
 
+        # Admin-only (as requested).
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if not member or not (member.guild_permissions.administrator or member.guild_permissions.manage_guild):
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
         new_keys = [k.strip() for k in keys.split(",") if k.strip()]
         if not new_keys:
             await interaction.response.send_message("No keys provided.", ephemeral=True)
             return
 
-        merged = add_api_keys(config.env_path, new_keys=new_keys)
+        stats = await asyncio.to_thread(
+            key_store.add_api_keys,
+            new_keys=new_keys,
+            added_by_id=interaction.user.id,
+            added_by_name=str(interaction.user),
+            source="guild",
+        )
         await interaction.response.send_message(
-            f"Stored {len(new_keys)} key(s). Total keys now: {len(merged)}.",
+            f"Stored {stats.get('added', 0)} key(s) to Firestore (skipped {stats.get('skipped', 0)} duplicate(s)). Total keys now: {stats.get('total', 0)}.",
             ephemeral=True,
         )
 
