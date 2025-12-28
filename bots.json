@@ -1,0 +1,19 @@
+{
+  "bots": [
+    {
+      "name": "Linae",
+      "character": "Lynae",
+      "token_env": "LINAE_BOT_TOKEN"
+    },
+    {
+      "name": "Shorekeeper",
+      "character": "Shorekeeper",
+      "token_env": "SHOREKEEPER_BOT_TOKEN"
+    },
+    {
+      "name": "Chisa",
+      "character": "Chisa",
+      "token_env": "CHISA_BOT_TOKEN"
+    }
+  ]
+}

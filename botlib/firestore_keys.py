@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import hashlib
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+
+_init_lock = threading.Lock()
+_app_inited = False
+
+
+def _init_firebase(*, credentials_path: Path) -> None:
+    global _app_inited
+    if _app_inited:
+        return
+    with _init_lock:
+        if _app_inited:
+            return
+        cred = credentials.Certificate(str(credentials_path))
+        firebase_admin.initialize_app(cred)
+        _app_inited = True
+
+
+def _sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class KeyMeta:
+    api_key: str
+    key_id: str
+    added_by_id: int
+    added_by_name: str
+    source: str  # "guild" | "dm"
+
+
+class FirestoreKeyStore:
+    def __init__(
+        self,
+        *,
+        credentials_path: Path,
+        collection: str,
+        doc_id: str = "admin_keys",
+    ) -> None:
+        _init_firebase(credentials_path=credentials_path)
+        self._db = firestore.client()
+        self._doc_ref = self._db.collection(collection).document(doc_id)
+
+    def list_api_keys(self) -> list[str]:
+        snap = self._doc_ref.get()
+        if not snap.exists:
+            return []
+        data = snap.to_dict() or {}
+        keys = data.get("keys")
+        if not isinstance(keys, dict):
+            return []
+
+        out: list[str] = []
+        for _, entry in keys.items():
+            if isinstance(entry, dict):
+                api_key = entry.get("api_key")
+                if isinstance(api_key, str) and api_key.strip():
+                    out.append(api_key.strip())
+
+        # De-dup preserve order
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for k in out:
+            if k not in seen:
+                seen.add(k)
+                deduped.append(k)
+        return deduped
+
+    def add_api_keys(
+        self,
+        *,
+        new_keys: list[str],
+        added_by_id: int,
+        added_by_name: str,
+        source: str,
+    ) -> dict[str, Any]:
+        cleaned = [k.strip() for k in new_keys if k and k.strip()]
+        if not cleaned:
+            return {"added": 0, "skipped": 0, "total": len(self.list_api_keys())}
+
+        # Build update payload with deterministic IDs so duplicates overwrite same entry.
+        update: dict[str, Any] = {}
+        for api_key in cleaned:
+            kid = _sha256_hex(api_key)[:24]
+            update[f"keys.{kid}"] = {
+                "api_key": api_key,
+                "key_id": kid,
+                "added_by": {"id": added_by_id, "name": added_by_name},
+                "added_at": firestore.SERVER_TIMESTAMP,
+                "source": source,
+            }
+
+        # Ensure doc exists; set merge also works.
+        self._doc_ref.set({}, merge=True)
+        self._doc_ref.update(update)
+
+        total = len(self.list_api_keys())
+        return {"added": len(update), "skipped": 0, "total": total}
