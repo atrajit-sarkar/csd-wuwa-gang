@@ -134,14 +134,29 @@ class FirestoreUserProfileStore:
         *,
         credentials_path: Path,
         collection: str,
+        bot_key: str,
         prefix: str = "user_profile_",
     ) -> None:
         _init_firebase(credentials_path=credentials_path)
         self._db = firestore.client()
         self._collection = collection
         self._prefix = prefix
+        self._bot_key = self._sanitize_key(bot_key)
+
+    @staticmethod
+    def _sanitize_key(value: str) -> str:
+        v = (value or "").strip().lower()
+        # keep a-z0-9 and underscores only
+        v = re.sub(r"[^a-z0-9]+", "_", v)
+        v = re.sub(r"_+", "_", v).strip("_")
+        return v or "default"
 
     def _doc_ref(self, user_id: int):
+        # Per-bot profile document.
+        return self._db.collection(self._collection).document(f"{self._prefix}{self._bot_key}_{user_id}")
+
+    def _legacy_doc_ref(self, user_id: int):
+        # Back-compat: old global (non-bot-specific) profile document.
         return self._db.collection(self._collection).document(f"{self._prefix}{user_id}")
 
     def record_user_message(self, *, user_id: int, user_name: str, content: str, source: str = "discord") -> None:
@@ -174,7 +189,11 @@ class FirestoreUserProfileStore:
     def get_summary(self, *, user_id: int) -> Optional[UserProfileSummary]:
         snap = self._doc_ref(user_id).get()
         if not snap.exists:
-            return None
+            # Fallback to legacy global profile if bot-specific doesn't exist yet.
+            legacy = self._legacy_doc_ref(user_id).get()
+            if not legacy.exists:
+                return None
+            snap = legacy
 
         data = snap.to_dict() or {}
         stats = data.get("stats") if isinstance(data, dict) else None

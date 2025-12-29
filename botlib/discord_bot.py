@@ -234,6 +234,7 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
     profile_store = FirestoreUserProfileStore(
         credentials_path=config.firebase_credentials_path,
         collection=config.firestore_collection,
+        bot_key=bot_name,
     )
 
     channel_memory_store = FirestoreChannelMemoryStore(
