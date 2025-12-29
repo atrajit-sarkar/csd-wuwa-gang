@@ -7,6 +7,7 @@ from discord import app_commands
 
 from .config import load_config
 from .firestore_keys import FirestoreKeyStore
+from .channel_memory import FirestoreChannelMemoryStore
 
 
 def _parse_keys_arg(text: str) -> list[str]:
@@ -21,6 +22,11 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
         credentials_path=config.firebase_credentials_path,
         collection=config.firestore_collection,
         doc_id=config.firestore_admin_keys_doc,
+    )
+
+    channel_memory_store = FirestoreChannelMemoryStore(
+        credentials_path=config.firebase_credentials_path,
+        collection=config.firestore_collection,
     )
 
     intents = discord.Intents.default()
@@ -179,6 +185,42 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
 
         await interaction.response.send_message(
             f"Cleared runtime model override. Chatbots will now use default from .env: {config.ollama_model}",
+            ephemeral=True,
+        )
+
+    @tree.command(
+        name="clear_channel_memory",
+        description="Clear stored channel memory (summary + recent messages) for the configured target channel",
+        guild=guild_obj,
+    )
+    async def clear_channel_memory(interaction: discord.Interaction):
+        # Only allow in the configured energy channel.
+        if interaction.channel_id != config.energy_channel_id:
+            await interaction.response.send_message(
+                "This command can only be used in the configured energy channel.",
+                ephemeral=True,
+            )
+            return
+
+        if not await _is_admin(interaction):
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        try:
+            await asyncio.to_thread(
+                channel_memory_store.clear_memory,
+                guild_id=config.guild_id,
+                channel_id=config.target_channel_id,
+            )
+        except Exception as exc:
+            await interaction.response.send_message(
+                f"Failed to clear channel memory: {type(exc).__name__}: {exc}",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            f"Cleared stored channel memory for target channel id: {config.target_channel_id}",
             ephemeral=True,
         )
 

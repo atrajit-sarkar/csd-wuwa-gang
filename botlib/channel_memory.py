@@ -168,6 +168,19 @@ class FirestoreChannelMemoryStore:
                 out.append(int(mid))
         return out
 
+    def clear_memory(self, *, guild_id: int, channel_id: int) -> None:
+        """Delete channel memory summary and stored recent messages.
+
+        This removes the channel memory document and best-effort deletes all docs in the
+        recent_messages subcollection.
+        """
+
+        recent_coll = self._recent_ref(guild_id=guild_id, channel_id=channel_id)
+        for doc in recent_coll.stream():
+            doc.reference.delete()
+
+        self._doc_ref(guild_id=guild_id, channel_id=channel_id).delete()
+
     def get_recent_messages_for_summary(
         self,
         *,
