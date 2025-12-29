@@ -42,8 +42,11 @@ def _mentions_me(message: discord.Message, my_user_id: int) -> bool:
     return any(u.id == my_user_id for u in message.mentions)
 
 
-def _to_chat_role(author_is_bot: bool) -> str:
-    return "assistant" if author_is_bot else "user"
+def _to_chat_role(*, author_id: int | None, author_is_bot: bool, my_user_id: int) -> str:
+    # Only THIS bot's own messages should be treated as assistant turns.
+    if author_is_bot and author_id == my_user_id:
+        return "assistant"
+    return "user"
 
 
 def _normalize_name_trigger(text: str) -> str:
@@ -171,13 +174,23 @@ def _score_relevance(content: str, query_words: set[str]) -> int:
     return len(c_words & query_words)
 
 
-def _discord_messages_to_chat(messages: list[discord.Message]) -> list[dict[str, str]]:
+def _discord_messages_to_chat(messages: list[discord.Message], *, my_user_id: int) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     for m in messages:
         content = (m.content or "").strip()
         if not content:
             continue
-        out.append({"role": _to_chat_role(author_is_bot=bool(m.author and m.author.bot)), "content": content})
+        author = m.author
+        author_id = author.id if author else 0
+        author_is_bot = bool(author and author.bot)
+        role = _to_chat_role(author_id=author_id, author_is_bot=author_is_bot, my_user_id=my_user_id)
+
+        # If it came from a different bot, label it so it doesn't impersonate this bot.
+        if author_is_bot and author_id != my_user_id:
+            name = getattr(author, "display_name", None) or getattr(author, "name", None) or "Bot"
+            content = f"[{name}] {content}"
+
+        out.append({"role": role, "content": content})
     return out
 
 
@@ -387,6 +400,7 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                 message_id=message.id,
                 author_id=message.author.id,
                 author_is_bot=bool(message.author.bot),
+                author_name=(getattr(message.author, "display_name", None) or getattr(message.author, "name", None) or str(message.author)),
                 content=message.content,
             )
         except Exception:
@@ -478,17 +492,28 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                     for m in fs_memory.recent_messages:
                         if isinstance(m, dict) and m.get("message_id") == message.id:
                             continue
-                        role = m.get("role")
+
                         content = m.get("content")
-                        if isinstance(role, str) and isinstance(content, str) and content.strip():
-                            filtered.append({"role": role, "content": content.strip()})
+                        if not isinstance(content, str) or not content.strip():
+                            continue
+
+                        author_id = m.get("author_id") if isinstance(m.get("author_id"), int) else None
+                        author_is_bot = bool(m.get("author_is_bot")) if isinstance(m.get("author_is_bot"), bool) else False
+                        author_name = m.get("author_name") if isinstance(m.get("author_name"), str) else ""
+
+                        role = _to_chat_role(author_id=author_id, author_is_bot=author_is_bot, my_user_id=me.id)
+                        if author_is_bot and author_id != me.id:
+                            name = author_name.strip() or "Bot"
+                            content = f"[{name}] {content.strip()}"
+
+                        filtered.append({"role": role, "content": content.strip()})
                     if filtered:
                         context = filtered[-_MAX_CONTEXT_MESSAGES:]
 
                 if needs_deep or len(context) < desired_depth:
                     fetch_limit = _DEEP_HISTORY_LIMIT if needs_deep else desired_depth
                     fetched = await _fetch_channel_history(channel=message.channel, before=message, limit=fetch_limit)
-                    fetched_chat = _discord_messages_to_chat(fetched)
+                    fetched_chat = _discord_messages_to_chat(fetched, my_user_id=me.id)
 
                     if needs_deep and fetched_chat:
                         query_words = _keywords(message.content)

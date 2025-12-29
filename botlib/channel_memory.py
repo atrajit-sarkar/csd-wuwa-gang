@@ -58,16 +58,19 @@ class FirestoreChannelMemoryStore:
         message_id: int,
         author_id: int,
         author_is_bot: bool,
+        author_name: str,
         content: str,
     ) -> None:
         content = (content or "").strip()
         if not content:
             return
 
-        role = "assistant" if author_is_bot else "user"
+        role = "assistant" if author_is_bot else "user"  # for backward compat; real role is decided at read-time
         doc = {
             "message_id": message_id,
             "author_id": author_id,
+            "author_is_bot": bool(author_is_bot),
+            "author_name": (author_name or "").strip(),
             "role": role,
             "content": content,
             "created_at": firestore.SERVER_TIMESTAMP,
@@ -118,8 +121,21 @@ class FirestoreChannelMemoryStore:
             role = row.get("role")
             content = row.get("content")
             mid = row.get("message_id")
-            if isinstance(role, str) and isinstance(content, str) and content.strip() and isinstance(mid, int):
-                recent.append({"message_id": mid, "role": role, "content": content.strip()})
+            author_id = row.get("author_id")
+            author_is_bot = row.get("author_is_bot")
+            author_name = row.get("author_name")
+
+            if isinstance(content, str) and content.strip() and isinstance(mid, int):
+                recent.append(
+                    {
+                        "message_id": mid,
+                        "role": role if isinstance(role, str) else "",
+                        "content": content.strip(),
+                        "author_id": author_id if isinstance(author_id, int) else None,
+                        "author_is_bot": bool(author_is_bot) if isinstance(author_is_bot, bool) else None,
+                        "author_name": author_name if isinstance(author_name, str) else "",
+                    }
+                )
 
         recent_count = int(data.get("recent_count") or 0)
         return ChannelMemory(summary=summary.strip(), recent_messages=recent, recent_count=recent_count)
@@ -197,8 +213,13 @@ class FirestoreChannelMemoryStore:
         out: list[dict[str, str]] = []
         for d in docs:
             row = d.to_dict() or {}
-            role = row.get("role")
             content = row.get("content")
-            if isinstance(role, str) and isinstance(content, str) and content.strip():
-                out.append({"role": role, "content": content.strip()})
+            role = row.get("role")
+            author_name = row.get("author_name")
+
+            if isinstance(content, str) and content.strip():
+                # For summarization, keep a simple role + speaker label to avoid confusing multiple bots.
+                speaker = (author_name or "").strip()
+                prefix = f"[{speaker}] " if speaker else ""
+                out.append({"role": role if isinstance(role, str) and role else "user", "content": prefix + content.strip()})
         return out
