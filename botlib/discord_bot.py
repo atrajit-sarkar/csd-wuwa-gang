@@ -199,12 +199,15 @@ async def _fetch_channel_history(
     channel: discord.abc.Messageable,
     before: discord.Message,
     limit: int,
+    after_message_id: int | None = None,
 ) -> list[discord.Message]:
     if not isinstance(channel, discord.TextChannel):
         return []
 
+    after_obj = discord.Object(id=after_message_id) if isinstance(after_message_id, int) and after_message_id > 0 else None
+
     fetched: list[discord.Message] = []
-    async for m in channel.history(limit=limit, before=before, oldest_first=True):
+    async for m in channel.history(limit=limit, before=before, after=after_obj, oldest_first=True):
         fetched.append(m)
     return fetched
 
@@ -489,9 +492,14 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                 if fs_memory and fs_memory.recent_messages:
                     # Filter out the current message if it appears in the persisted window.
                     filtered: list[dict[str, str]] = []
+                    cutoff_id = fs_memory.cutoff_message_id if fs_memory else None
                     for m in fs_memory.recent_messages:
                         if isinstance(m, dict) and m.get("message_id") == message.id:
                             continue
+
+                        if isinstance(cutoff_id, int) and isinstance(m, dict) and isinstance(m.get("message_id"), int):
+                            if m.get("message_id") <= cutoff_id:
+                                continue
 
                         content = m.get("content")
                         if not isinstance(content, str) or not content.strip():
@@ -511,8 +519,14 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                         context = filtered[-_MAX_CONTEXT_MESSAGES:]
 
                 if needs_deep or len(context) < desired_depth:
+                    cutoff_id = fs_memory.cutoff_message_id if fs_memory else None
                     fetch_limit = _DEEP_HISTORY_LIMIT if needs_deep else desired_depth
-                    fetched = await _fetch_channel_history(channel=message.channel, before=message, limit=fetch_limit)
+                    fetched = await _fetch_channel_history(
+                        channel=message.channel,
+                        before=message,
+                        limit=fetch_limit,
+                        after_message_id=cutoff_id,
+                    )
                     fetched_chat = _discord_messages_to_chat(fetched, my_user_id=me.id)
 
                     if needs_deep and fetched_chat:

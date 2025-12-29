@@ -206,11 +206,25 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
             await interaction.response.send_message("Admins only.", ephemeral=True)
             return
 
+        # Announce in the target channel and use that message as a cutoff marker.
+        cutoff_message_id: int | None = None
+        try:
+            target_channel = client.get_channel(config.target_channel_id)
+            if target_channel and isinstance(target_channel, discord.abc.Messageable):
+                line = "―" * 40
+                marker = await target_channel.send(
+                    f"{line}\n⚠️ Channel memory reset. Bots will ignore messages before this point.\n{line}"
+                )
+                cutoff_message_id = getattr(marker, "id", None)
+        except Exception:
+            cutoff_message_id = None
+
         try:
             await asyncio.to_thread(
                 channel_memory_store.clear_memory,
                 guild_id=config.guild_id,
                 channel_id=config.target_channel_id,
+                cutoff_message_id=cutoff_message_id,
             )
         except Exception as exc:
             await interaction.response.send_message(
@@ -220,7 +234,7 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
             return
 
         await interaction.response.send_message(
-            f"Cleared stored channel memory for target channel id: {config.target_channel_id}",
+            f"Cleared stored channel memory for target channel id: {config.target_channel_id} (cutoff={cutoff_message_id or 'none'}).",
             ephemeral=True,
         )
 

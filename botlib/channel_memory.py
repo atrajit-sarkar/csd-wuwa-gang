@@ -15,6 +15,7 @@ class ChannelMemory:
     # Recent messages (chronological), each: {message_id, role, content}
     recent_messages: list[dict[str, Any]]
     recent_count: int
+    cutoff_message_id: Optional[int]
 
 
 class FirestoreChannelMemoryStore:
@@ -106,6 +107,7 @@ class FirestoreChannelMemoryStore:
 
         data = snap.to_dict() or {}
         summary = data.get("summary") if isinstance(data.get("summary"), str) else ""
+        cutoff_message_id = data.get("cutoff_message_id") if isinstance(data.get("cutoff_message_id"), int) else None
 
         # Fetch recent messages ordered by id.
         query = (
@@ -138,7 +140,12 @@ class FirestoreChannelMemoryStore:
                 )
 
         recent_count = int(data.get("recent_count") or 0)
-        return ChannelMemory(summary=summary.strip(), recent_messages=recent, recent_count=recent_count)
+        return ChannelMemory(
+            summary=summary.strip(),
+            recent_messages=recent,
+            recent_count=recent_count,
+            cutoff_message_id=cutoff_message_id,
+        )
 
     def set_summary_and_compact(
         self,
@@ -184,7 +191,7 @@ class FirestoreChannelMemoryStore:
                 out.append(int(mid))
         return out
 
-    def clear_memory(self, *, guild_id: int, channel_id: int) -> None:
+    def clear_memory(self, *, guild_id: int, channel_id: int, cutoff_message_id: int | None = None) -> None:
         """Delete channel memory summary and stored recent messages.
 
         This removes the channel memory document and best-effort deletes all docs in the
@@ -195,7 +202,17 @@ class FirestoreChannelMemoryStore:
         for doc in recent_coll.stream():
             doc.reference.delete()
 
-        self._doc_ref(guild_id=guild_id, channel_id=channel_id).delete()
+        # Keep the doc so we can persist a cutoff marker (prevents bots from re-reading pre-reset Discord history).
+        update: dict[str, Any] = {
+            "summary": "",
+            "recent_count": 0,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+            "cleared_at": firestore.SERVER_TIMESTAMP,
+        }
+        if isinstance(cutoff_message_id, int) and cutoff_message_id > 0:
+            update["cutoff_message_id"] = cutoff_message_id
+
+        self._doc_ref(guild_id=guild_id, channel_id=channel_id).set(update, merge=True)
 
     def get_recent_messages_for_summary(
         self,
