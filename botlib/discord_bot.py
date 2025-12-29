@@ -8,6 +8,7 @@ from typing import Deque
 import re
 import json
 import time
+import os
 
 import discord
 from discord import app_commands
@@ -36,6 +37,35 @@ def _is_reply_to_me(message: discord.Message, my_user_id: int) -> bool:
     if isinstance(resolved, discord.Message) and resolved.author and resolved.author.id == my_user_id:
         return True
     return False
+
+
+async def _get_reply_target_author(message: discord.Message) -> tuple[int | None, bool]:
+    """Return (author_id, author_is_bot) for the message being replied to.
+
+    Discord does not always populate message.reference.resolved, so we best-effort fetch.
+    """
+
+    ref = message.reference
+    if not ref:
+        return None, False
+
+    resolved = ref.resolved
+    if isinstance(resolved, discord.Message) and resolved.author:
+        return resolved.author.id, bool(resolved.author.bot)
+
+    message_id = getattr(ref, "message_id", None)
+    if not isinstance(message_id, int):
+        return None, False
+
+    try:
+        if isinstance(message.channel, discord.TextChannel):
+            fetched = await message.channel.fetch_message(message_id)
+            if fetched and fetched.author:
+                return fetched.author.id, bool(fetched.author.bot)
+    except Exception:
+        return None, False
+
+    return None, False
 
 
 def _mentions_me(message: discord.Message, my_user_id: int) -> bool:
@@ -426,6 +456,14 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         if not me:
             return
 
+        mentions_me = _mentions_me(message, me.id)
+
+        # If the user is replying to a different bot, do not respond unless explicitly mentioned.
+        reply_author_id, reply_author_is_bot = await _get_reply_target_author(message)
+        is_reply_to_me = bool(reply_author_id == me.id)
+        if reply_author_is_bot and reply_author_id != me.id and not mentions_me:
+            return
+
         # Reply trigger rule:
         # - if user mentions the bot, reply
         # - OR if the user writes ONLY the bot name (e.g. "Linae")
@@ -433,13 +471,16 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         bot_name_norm = _normalize_name_trigger(bot_name)
         character_name_norm = _normalize_name_trigger(character_name)
 
-        triggered = (
-            _mentions_me(message, me.id)
-            or _is_reply_to_me(message, me.id)
-            or (content_norm in {bot_name_norm, character_name_norm})
-        )
+        # Name-only trigger is allowed only when this message is NOT a reply to another bot.
+        allow_name_only = not (reply_author_is_bot and reply_author_id != me.id)
+
+        triggered = mentions_me or is_reply_to_me or (allow_name_only and (content_norm in {bot_name_norm, character_name_norm}))
         if not triggered:
             return
+
+        if os.getenv("DEBUG_BOT_TRIGGERS", "").strip().lower() in {"1", "true", "yes"}:
+            why = "mention" if mentions_me else ("reply" if is_reply_to_me else "name_only")
+            print(f"[{bot_name}] trigger={why} user={message.author.id} msg={message.id}")
 
         # Persist ONLY this bot's conversation turns:
         # - the triggering user message
