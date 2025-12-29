@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -24,10 +26,29 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
         doc_id=config.firestore_admin_keys_doc,
     )
 
-    channel_memory_store = FirestoreChannelMemoryStore(
-        credentials_path=config.firebase_credentials_path,
-        collection=config.firestore_collection,
-    )
+    def _load_character_bot_names() -> list[str]:
+        # Uses workspace-level bots.json.
+        try:
+            root = Path(__file__).resolve().parents[1]
+            data = json.loads((root / "bots.json").read_text(encoding="utf-8"))
+            bots = data.get("bots") if isinstance(data, dict) else None
+            if not isinstance(bots, list):
+                return []
+
+            out: list[str] = []
+            for b in bots:
+                if not isinstance(b, dict):
+                    continue
+                if (b.get("type") or "").strip().lower() == "admin":
+                    continue
+                name = (b.get("name") or "").strip()
+                if name:
+                    out.append(name)
+            return out
+        except Exception:
+            return []
+
+    character_bot_names = _load_character_bot_names()
 
     intents = discord.Intents.default()
     intents.message_content = True
@@ -219,22 +240,53 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
         except Exception:
             cutoff_message_id = None
 
-        try:
-            await asyncio.to_thread(
-                channel_memory_store.clear_memory,
-                guild_id=config.guild_id,
-                channel_id=config.target_channel_id,
-                cutoff_message_id=cutoff_message_id,
-            )
-        except Exception as exc:
+        # Clear per-bot memories so bots don't leak context into each other.
+        cleared: list[str] = []
+        failed: list[str] = []
+        for name in (character_bot_names or []):
+            try:
+                store = FirestoreChannelMemoryStore(
+                    credentials_path=config.firebase_credentials_path,
+                    collection=config.firestore_collection,
+                    bot_key=name,
+                )
+                await asyncio.to_thread(
+                    store.clear_all_user_memories,
+                    guild_id=config.guild_id,
+                    channel_id=config.target_channel_id,
+                    cutoff_message_id=cutoff_message_id,
+                )
+                cleared.append(name)
+            except Exception:
+                failed.append(name)
+
+        if not character_bot_names:
+            # Fallback: clear at least one store name to avoid command being a no-op.
+            try:
+                store = FirestoreChannelMemoryStore(
+                    credentials_path=config.firebase_credentials_path,
+                    collection=config.firestore_collection,
+                    bot_key="default",
+                )
+                await asyncio.to_thread(
+                    store.clear_all_user_memories,
+                    guild_id=config.guild_id,
+                    channel_id=config.target_channel_id,
+                    cutoff_message_id=cutoff_message_id,
+                )
+                cleared.append("default")
+            except Exception:
+                failed.append("default")
+
+        if failed and not cleared:
             await interaction.response.send_message(
-                f"Failed to clear channel memory: {type(exc).__name__}: {exc}",
+                f"Failed to clear channel memory for any bot. (cutoff={cutoff_message_id or 'none'})",
                 ephemeral=True,
             )
             return
 
         await interaction.response.send_message(
-            f"Cleared stored channel memory for target channel id: {config.target_channel_id} (cutoff={cutoff_message_id or 'none'}).",
+            f"Cleared per-bot channel memory for target channel id: {config.target_channel_id} (cutoff={cutoff_message_id or 'none'}). Cleared: {', '.join(cleared) or 'none'}. Failed: {', '.join(failed) or 'none'}.",
             ephemeral=True,
         )
 

@@ -22,10 +22,10 @@ from .channel_memory import FirestoreChannelMemoryStore
 
 @dataclass
 class BotRuntime:
-    channel_history: dict[int, Deque[dict[str, str]]]
+    channel_history: dict[tuple[int, int], Deque[dict[str, str]]]
     user_last_profile_update_s: dict[int, float]
-    channel_summarizing: set[int]
-    channel_last_summarize_attempt_s: dict[int, float]
+    channel_summarizing: set[tuple[int, int]]
+    channel_last_summarize_attempt_s: dict[tuple[int, int], float]
 
 
 def _is_reply_to_me(message: discord.Message, my_user_id: int) -> bool:
@@ -256,6 +256,7 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
     channel_memory_store = FirestoreChannelMemoryStore(
         credentials_path=config.firebase_credentials_path,
         collection=config.firestore_collection,
+        bot_key=bot_name,
     )
 
     characters_md_path = Path(__file__).resolve().parents[1] / "characters.md"
@@ -300,22 +301,24 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         )
         return resp.content
 
-    async def maybe_resummarize_channel_memory(*, guild_id: int, channel_id: int) -> None:
+    async def maybe_resummarize_channel_memory(*, guild_id: int, channel_id: int, user_id: int) -> None:
         now = time.monotonic()
-        last_try = runtime.channel_last_summarize_attempt_s.get(channel_id, 0.0)
+        key = (channel_id, user_id)
+        last_try = runtime.channel_last_summarize_attempt_s.get(key, 0.0)
         if (now - last_try) < _FS_SUMMARIZE_DEBOUNCE_S:
             return
-        runtime.channel_last_summarize_attempt_s[channel_id] = now
+        runtime.channel_last_summarize_attempt_s[key] = now
 
-        if channel_id in runtime.channel_summarizing:
+        if key in runtime.channel_summarizing:
             return
-        runtime.channel_summarizing.add(channel_id)
+        runtime.channel_summarizing.add(key)
 
         try:
             ids = await asyncio.to_thread(
                 channel_memory_store.list_recent_message_ids,
                 guild_id=guild_id,
                 channel_id=channel_id,
+                user_id=user_id,
                 limit=500,
             )
             if len(ids) < _FS_SUMMARY_TRIGGER:
@@ -325,6 +328,7 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                 channel_memory_store.get_recent_messages_for_summary,
                 guild_id=guild_id,
                 channel_id=channel_id,
+                user_id=user_id,
                 limit=min(len(ids), 220),
             )
 
@@ -332,6 +336,7 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                 channel_memory_store.get_memory,
                 guild_id=guild_id,
                 channel_id=channel_id,
+                user_id=user_id,
                 recent_limit=0,
             )
             existing_summary = (existing.summary if existing else "").strip()
@@ -340,6 +345,7 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                 "You are a professional conversation summarizer. "
                 "Maintain a compact CHANNEL MEMORY SUMMARY for future replies. "
                 "Write plain text. Be factual and concise. "
+                "Never invent facts; if something is unclear, omit it. "
                 "Do NOT include personal sensitive data (addresses, phone numbers, secrets, tokens). "
                 "Do NOT output message-by-message logs. "
                 "Do NOT write instructions about how the assistant should behave or speak (no style/persona rules). "
@@ -366,13 +372,14 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                 channel_memory_store.set_summary_and_compact,
                 guild_id=guild_id,
                 channel_id=channel_id,
+                user_id=user_id,
                 new_summary=new_summary,
                 keep_last_message_ids=keep_ids,
             )
         except Exception:
             return
         finally:
-            runtime.channel_summarizing.discard(channel_id)
+            runtime.channel_summarizing.discard(key)
 
     @client.event
     async def on_ready():
@@ -393,24 +400,6 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
             return
         if message.channel.id != config.target_channel_id:
             return
-
-        # Persist channel chat into Firestore memory (store BOTH user+bot messages).
-        try:
-            await asyncio.to_thread(
-                channel_memory_store.append_message,
-                guild_id=message.guild.id,
-                channel_id=message.channel.id,
-                message_id=message.id,
-                author_id=message.author.id,
-                author_is_bot=bool(message.author.bot),
-                author_name=(getattr(message.author, "display_name", None) or getattr(message.author, "name", None) or str(message.author)),
-                content=message.content,
-            )
-        except Exception:
-            pass
-
-        # Background: keep channel memory compact and up-to-date.
-        asyncio.create_task(maybe_resummarize_channel_memory(guild_id=message.guild.id, channel_id=message.channel.id))
 
         # Never respond to bot-authored messages.
         if message.author.bot:
@@ -433,10 +422,6 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                 # Never fail chat on profiling issues.
                 pass
 
-        # Rolling in-memory context (helps when Discord history fetch is slow / rate limited).
-        history = runtime.channel_history[message.channel.id]
-        history.append({"role": "user", "content": message.content})
-
         me = client.user
         if not me:
             return
@@ -456,6 +441,38 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         if not triggered:
             return
 
+        # Persist ONLY this bot's conversation turns:
+        # - the triggering user message
+        # - this bot's eventual reply
+        try:
+            await asyncio.to_thread(
+                channel_memory_store.append_message,
+                guild_id=message.guild.id,
+                channel_id=message.channel.id,
+                user_id=message.author.id,
+                message_id=message.id,
+                author_id=message.author.id,
+                author_is_bot=False,
+                author_name=(
+                    getattr(message.author, "display_name", None)
+                    or getattr(message.author, "name", None)
+                    or str(message.author)
+                ),
+                content=message.content,
+            )
+        except Exception:
+            pass
+
+        # Background: keep per-bot channel memory compact and up-to-date.
+        asyncio.create_task(
+            maybe_resummarize_channel_memory(guild_id=message.guild.id, channel_id=message.channel.id, user_id=message.author.id)
+        )
+
+        # Rolling in-memory context should also be per-bot: only store turns relevant to this bot.
+        history_key = (message.channel.id, message.author.id)
+        history = runtime.channel_history[history_key]
+        history.append({"role": "user", "content": message.content})
+
         # Generate reply (show typing indicator so it feels human).
         try:
             async with message.channel.typing():
@@ -469,7 +486,7 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                     user_profile_summary = None
 
                 # Always provide ~12-20 messages of context.
-                # Prefer in-memory context, but fill from Discord channel history when needed.
+                # Prefer per-bot Firestore memory + per-bot in-memory history.
                 needs_deep = _needs_deeper_history(message.content)
                 desired_depth = _BASE_HISTORY_DEPTH
 
@@ -484,6 +501,7 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                         channel_memory_store.get_memory,
                         guild_id=message.guild.id,
                         channel_id=message.channel.id,
+                        user_id=message.author.id,
                         recent_limit=_FS_DEEP_LIMIT if needs_deep else _FS_RECENT_LIMIT,
                     )
                 except Exception:
@@ -518,44 +536,9 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                     if filtered:
                         context = filtered[-_MAX_CONTEXT_MESSAGES:]
 
-                if needs_deep or len(context) < desired_depth:
-                    cutoff_id = fs_memory.cutoff_message_id if fs_memory else None
-                    fetch_limit = _DEEP_HISTORY_LIMIT if needs_deep else desired_depth
-                    fetched = await _fetch_channel_history(
-                        channel=message.channel,
-                        before=message,
-                        limit=fetch_limit,
-                        after_message_id=cutoff_id,
-                    )
-                    fetched_chat = _discord_messages_to_chat(fetched, my_user_id=me.id)
-
-                    if needs_deep and fetched_chat:
-                        query_words = _keywords(message.content)
-
-                        # Always include the most recent window.
-                        recent = fetched_chat[-desired_depth:]
-
-                        # Also include a small set of older, relevant messages.
-                        scored: list[tuple[int, int, dict[str, str]]] = []
-                        for idx, msg in enumerate(fetched_chat[:-desired_depth]):
-                            score = _score_relevance(msg.get("content", ""), query_words)
-                            if score > 0:
-                                scored.append((score, idx, msg))
-                        scored.sort(key=lambda t: (-t[0], t[1]))
-                        relevant = [m for _, _, m in scored[: max(10, desired_depth)]]
-
-                        # Merge and de-dup by content+role to keep ordering stable.
-                        merged: list[dict[str, str]] = []
-                        seen: set[tuple[str, str]] = set()
-                        for m in (relevant + recent):
-                            key = (m.get("role", ""), m.get("content", ""))
-                            if key in seen:
-                                continue
-                            seen.add(key)
-                            merged.append(m)
-                        context = merged[-_MAX_CONTEXT_MESSAGES:]
-                    elif fetched_chat:
-                        context = fetched_chat[-desired_depth:]
+                # NOTE: We intentionally do NOT backfill from Discord channel history here.
+                # In a multi-bot shared channel, history is ambiguous and can cause cross-bot context bleed.
+                # If the user asks about "earlier", we just pull a larger per-bot persisted window.
 
                 messages: list[dict[str, str]] = [
                     {"role": "system", "content": system_prompt},
@@ -612,8 +595,28 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         if len(reply) > 1800:
             reply = reply[:1800].rstrip() + "…"
 
-        await message.channel.send(reply)
+        sent = await message.channel.send(reply)
         history.append({"role": "assistant", "content": reply})
+
+        # Persist this bot's reply as an assistant turn.
+        try:
+            await asyncio.to_thread(
+                channel_memory_store.append_message,
+                guild_id=message.guild.id,
+                channel_id=message.channel.id,
+                user_id=message.author.id,
+                message_id=sent.id,
+                author_id=me.id,
+                author_is_bot=True,
+                author_name=(getattr(me, "display_name", None) or getattr(me, "name", None) or bot_name),
+                content=reply,
+            )
+        except Exception:
+            pass
+
+        asyncio.create_task(
+            maybe_resummarize_channel_memory(guild_id=message.guild.id, channel_id=message.channel.id, user_id=message.author.id)
+        )
 
     await client.start(config.discord_token)
 
