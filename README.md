@@ -13,6 +13,8 @@
   - `FIRESTORE_COLLECTION`
   - Optional: `FIRESTORE_ADMIN_KEYS_DOC` (defaults to `admin_keys`)
 
+Note: by default, `.env` will NOT override existing process environment variables. If you run under a process manager like `pm2` and you updated `.env` but the process still uses old values, set `DOTENV_OVERRIDE=1` and restart.
+
 ## Run Linae bot
 
 - `python run_bot.py --type character --bot-name Linae --character-name Lynae --token-env LINAE_BOT_TOKEN`

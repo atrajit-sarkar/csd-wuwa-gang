@@ -35,7 +35,12 @@ def load_config(
     import os
 
     env_path = env_path or Path(__file__).resolve().parents[1] / ".env"
-    load_dotenv(dotenv_path=env_path, override=False)
+
+    # When running under process managers (e.g. pm2), stale environment variables can
+    # persist across restarts. Allow opting into `.env` overriding the process env to
+    # keep deployments consistent with local runs.
+    dotenv_override = os.getenv("DOTENV_OVERRIDE", "").strip().lower() in {"1", "true", "yes", "on"}
+    load_dotenv(dotenv_path=env_path, override=dotenv_override)
 
     discord_token = os.getenv(token_env, "").strip()
     if not discord_token:
