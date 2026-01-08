@@ -11,6 +11,7 @@ import re
 import json
 import time
 import os
+import shutil
 
 import discord
 from discord import app_commands
@@ -419,6 +420,25 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         if not speak_text:
             return False, "empty_text"
 
+        # Voice playback dependencies on Linux:
+        # - ffmpeg must be installed and in PATH
+        # - libopus must be available (discord.py needs it to encode)
+        ffmpeg_path = shutil.which("ffmpeg")
+        if not ffmpeg_path:
+            return False, "ffmpeg_missing"
+
+        if not discord.opus.is_loaded():
+            # Best-effort load common library names.
+            for cand in ("libopus.so.0", "libopus.so", "opus"):
+                try:
+                    discord.opus.load_opus(cand)
+                    if discord.opus.is_loaded():
+                        break
+                except Exception:
+                    continue
+        if not discord.opus.is_loaded():
+            return False, "opus_missing"
+
         try:
             audio = await tts_with_key_rotation(
                 api_keys=eleven_keys,
@@ -451,7 +471,7 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
                 except Exception:
                     pass
 
-            source = discord.FFmpegPCMAudio(tmp_path)
+            source = discord.FFmpegPCMAudio(tmp_path, executable=ffmpeg_path)
             vc.play(source, after=_after_play)
             return True, "ok"
         except Exception as exc:
@@ -530,6 +550,32 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         vc = _voice_client_for_guild(interaction.guild)
         if not vc or not vc.is_connected():
             await interaction.response.send_message("I'm not in a voice channel. Use /join_voice first.", ephemeral=True)
+            return
+
+        # Fast dependency sanity check so deployments fail loudly.
+        ffmpeg_path = shutil.which("ffmpeg")
+        if not ffmpeg_path:
+            await interaction.response.send_message(
+                "I joined, but I can't speak here because `ffmpeg` isn't installed on this host. "
+                "On Ubuntu: `sudo apt-get update && sudo apt-get install -y ffmpeg`.",
+                ephemeral=True,
+            )
+            return
+
+        if not discord.opus.is_loaded():
+            for cand in ("libopus.so.0", "libopus.so", "opus"):
+                try:
+                    discord.opus.load_opus(cand)
+                    if discord.opus.is_loaded():
+                        break
+                except Exception:
+                    continue
+        if not discord.opus.is_loaded():
+            await interaction.response.send_message(
+                "I joined, but I can't speak because `libopus` isn't available on this host. "
+                "On Ubuntu: `sudo apt-get update && sudo apt-get install -y libopus0`.",
+                ephemeral=True,
+            )
             return
 
         runtime.guild_voice_chat_enabled[interaction.guild.id] = True
