@@ -38,3 +38,43 @@ Users (DM): DM the admin bot:
 - `add_more_energy key1,key2,key3`
 
 All additions record who added the keys.
+
+## ElevenLabs voice replies (optional)
+
+Bots can (sometimes) send an audio attachment (TTS) to feel more human.
+
+### 1) Store ElevenLabs API keys (Firestore)
+
+Admin (server channel): run this slash command in the configured energy channel:
+
+- `/add_voice_energy keys:key1,key2,key3`
+
+Users (DM): DM the admin bot:
+
+- `/submit_voice_energy keys:key1,key2,key3`
+
+### 2) Enable voice + choose voices per character (.env)
+
+Add these to `.env` (voice IDs are from your ElevenLabs account):
+
+- `ELEVENLABS_VOICE_ENABLED=1`
+- `ELEVENLABS_VOICE_ID_LYNAE=...`
+- `ELEVENLABS_VOICE_ID_SHOREKEEPER=...`
+- `ELEVENLABS_VOICE_ID_CHISA=...`
+- `ELEVENLABS_VOICE_ID_CANTARELLA=...`
+
+Optional tuning:
+
+- `ELEVENLABS_DEFAULT_VOICE_ID=...` (fallback if a per-character ID is missing)
+- `ELEVENLABS_MODEL_ID=eleven_multilingual_v2`
+- `ELEVENLABS_OUTPUT_FORMAT=mp3_44100_128`
+- `ELEVENLABS_VOICE_MAX_CHARS=420`
+- `ELEVENLABS_VOICE_COOLDOWN_S=120`
+- `ELEVENLABS_VOICE_FUN_PROB=0.12`
+
+Character voice vibe suggestions (pick voices in ElevenLabs that match these):
+
+- **Lynae**: upbeat, youthful, energetic, slightly rebellious
+- **Shorekeeper**: soft, dreamy, calm, “timeless/poetic”
+- **Chisa**: quiet, controlled, slightly eerie, precise
+- **Cantarella**: elegant, sultry, confident, teasing

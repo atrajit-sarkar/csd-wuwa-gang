@@ -76,6 +76,36 @@ class FirestoreKeyStore:
                 deduped.append(k)
         return deduped
 
+    def list_elevenlabs_api_keys(self) -> list[str]:
+        """List ElevenLabs API keys stored in Firestore.
+
+        Stored separately from Ollama keys to avoid mixing providers.
+        """
+
+        snap = self._doc_ref.get()
+        if not snap.exists:
+            return []
+
+        data = snap.to_dict() or {}
+        keys = data.get("elevenlabs_keys")
+        if not isinstance(keys, dict):
+            return []
+
+        out: list[str] = []
+        for _, entry in keys.items():
+            if isinstance(entry, dict):
+                api_key = entry.get("api_key")
+                if isinstance(api_key, str) and api_key.strip():
+                    out.append(api_key.strip())
+
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for k in out:
+            if k not in seen:
+                seen.add(k)
+                deduped.append(k)
+        return deduped
+
     def add_api_keys(
         self,
         *,
@@ -117,6 +147,45 @@ class FirestoreKeyStore:
             self._doc_ref.update(update)
 
         total = len(self.list_api_keys())
+        return {"added": len(update), "skipped": skipped, "total": total}
+
+    def add_elevenlabs_api_keys(
+        self,
+        *,
+        new_keys: list[str],
+        added_by_id: int,
+        added_by_name: str,
+        source: str,
+    ) -> dict[str, Any]:
+        cleaned = [k.strip() for k in new_keys if k and k.strip()]
+        if not cleaned:
+            return {"added": 0, "skipped": 0, "total": len(self.list_elevenlabs_api_keys())}
+
+        existing_snap = self._doc_ref.get()
+        existing_data = existing_snap.to_dict() if existing_snap.exists else {}
+        existing_keys = existing_data.get("elevenlabs_keys") if isinstance(existing_data, dict) else None
+        existing_key_ids: set[str] = set(existing_keys.keys()) if isinstance(existing_keys, dict) else set()
+
+        update: dict[str, Any] = {}
+        skipped = 0
+        for api_key in cleaned:
+            kid = _sha256_hex(api_key)[:24]
+            if kid in existing_key_ids:
+                skipped += 1
+                continue
+            update[f"elevenlabs_keys.{kid}"] = {
+                "api_key": api_key,
+                "key_id": kid,
+                "added_by": {"id": added_by_id, "name": added_by_name},
+                "added_at": firestore.SERVER_TIMESTAMP,
+                "source": source,
+            }
+
+        if update:
+            self._doc_ref.set({}, merge=True)
+            self._doc_ref.update(update)
+
+        total = len(self.list_elevenlabs_api_keys())
         return {"added": len(update), "skipped": skipped, "total": total}
 
     def get_ollama_model(self) -> Optional[str]:

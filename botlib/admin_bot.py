@@ -103,6 +103,43 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
         )
 
     @tree.command(
+        name="add_voice_energy",
+        description="Add ElevenLabs API keys to Firestore (comma separated)",
+        guild=guild_obj,
+    )
+    @app_commands.describe(keys="Comma separated ElevenLabs API keys")
+    async def add_voice_energy(interaction: discord.Interaction, keys: str):
+        # Only allow in the configured energy channel.
+        if interaction.channel_id != config.energy_channel_id:
+            await interaction.response.send_message(
+                "This command can only be used in the configured energy channel.",
+                ephemeral=True,
+            )
+            return
+
+        if not await _is_admin(interaction):
+            await interaction.response.send_message("Admins only.", ephemeral=True)
+            return
+
+        new_keys = _parse_keys_arg(keys)
+        if not new_keys:
+            await interaction.response.send_message("No keys provided.", ephemeral=True)
+            return
+
+        stats = await asyncio.to_thread(
+            key_store.add_elevenlabs_api_keys,
+            new_keys=new_keys,
+            added_by_id=interaction.user.id,
+            added_by_name=str(interaction.user),
+            source="guild",
+        )
+
+        await interaction.response.send_message(
+            f"Stored {stats.get('added', 0)} key(s) (skipped {stats.get('skipped', 0)} duplicate(s)). Total ElevenLabs keys now: {stats.get('total', 0)}.",
+            ephemeral=True,
+        )
+
+    @tree.command(
         name="set_ollama_model",
         description="Set the Ollama model used by all chatbots",
         guild=guild_obj,
@@ -308,6 +345,34 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
 
         stats = await asyncio.to_thread(
             key_store.add_api_keys,
+            new_keys=new_keys,
+            added_by_id=interaction.user.id,
+            added_by_name=str(interaction.user),
+            source="dm",
+        )
+
+        await interaction.response.send_message(
+            f"Thanks. Stored {stats.get('added', 0)} key(s) (skipped {stats.get('skipped', 0)} duplicate(s))."
+        )
+
+    @tree.command(name="submit_voice_energy", description="Submit your ElevenLabs API keys via DM (comma separated)")
+    @app_commands.describe(keys="Comma separated ElevenLabs API keys")
+    async def submit_voice_energy(interaction: discord.Interaction, keys: str):
+        # This is intended for DMs; in guilds, direct users to the energy channel.
+        if interaction.guild is not None:
+            await interaction.response.send_message(
+                "Please DM me this command, or ask an admin to use /add_voice_energy in the energy channel.",
+                ephemeral=True,
+            )
+            return
+
+        new_keys = _parse_keys_arg(keys)
+        if not new_keys:
+            await interaction.response.send_message("No keys provided.")
+            return
+
+        stats = await asyncio.to_thread(
+            key_store.add_elevenlabs_api_keys,
             new_keys=new_keys,
             added_by_id=interaction.user.id,
             added_by_name=str(interaction.user),
