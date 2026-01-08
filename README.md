@@ -78,3 +78,19 @@ Character voice vibe suggestions (pick voices in ElevenLabs that match these):
 - **Shorekeeper**: soft, dreamy, calm, “timeless/poetic”
 - **Chisa**: quiet, controlled, slightly eerie, precise
 - **Cantarella**: elegant, sultry, confident, teasing
+
+## Voice channel speaking (optional)
+
+Bots can also join a Discord voice channel and play TTS audio there.
+
+Requirements:
+
+- Install deps: `pip install -r requirements.txt` (includes `PyNaCl`)
+- Install `ffmpeg` and ensure it is on your `PATH` (required for voice playback)
+
+Commands (run in the server):
+
+- `/join_voice` — bot joins your current voice channel
+- `/leave_voice` — bot leaves voice
+- `/startspeak` — bot will speak its chat replies in voice (you must `/join_voice` first)
+- `/stopspeak` — bot stops speaking chat replies in voice

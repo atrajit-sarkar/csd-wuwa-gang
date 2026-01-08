@@ -5,6 +5,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 import io
 from pathlib import Path
+import tempfile
 from typing import Deque
 import re
 import json
@@ -34,6 +35,7 @@ class BotRuntime:
     channel_last_voice_sent_s: dict[tuple[int, int], float]
     force_voice_until_s: dict[tuple[int, int], float]
     channel_last_voice_diag_s: dict[tuple[int, int], float]
+    guild_voice_chat_enabled: dict[int, bool]
 
 
 def _user_asks_for_their_name(text: str) -> bool:
@@ -352,6 +354,7 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
     intents.message_content = True
     intents.guilds = True
     intents.messages = True
+    intents.voice_states = True
 
     client = discord.Client(intents=intents)
     tree = app_commands.CommandTree(client)
@@ -364,9 +367,179 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         channel_last_voice_sent_s={},
         force_voice_until_s={},
         channel_last_voice_diag_s={},
+        guild_voice_chat_enabled={},
     )
 
     guild_obj = discord.Object(id=config.guild_id)
+
+    def _voice_client_for_guild(guild: discord.Guild) -> discord.VoiceClient | None:
+        for vc in client.voice_clients:
+            if vc.guild and vc.guild.id == guild.id:
+                return vc
+        return None
+
+    async def _play_tts_in_voice(
+        *,
+        guild: discord.Guild,
+        text: str,
+        voice_profile,
+    ) -> tuple[bool, str]:
+        """Generate TTS via ElevenLabs and play it in the connected voice channel."""
+
+        vc = _voice_client_for_guild(guild)
+        if not vc or not vc.is_connected():
+            return False, "not_connected"
+
+        voice_enabled = os.getenv("ELEVENLABS_VOICE_ENABLED", "").strip().lower() in {"1", "true", "yes"}
+        if not voice_enabled:
+            return False, "voice_disabled"
+
+        if not voice_profile:
+            return False, "no_voice_profile"
+
+        try:
+            eleven_keys = await asyncio.to_thread(key_store.list_elevenlabs_api_keys)
+        except Exception:
+            eleven_keys = []
+        if not eleven_keys:
+            return False, "no_eleven_keys"
+
+        voice_max_chars = int(os.getenv("ELEVENLABS_VOICE_MAX_CHARS", "800") or "800")
+        speak_text = _truncate_for_voice(_sanitize_for_voice(text), voice_max_chars)
+        if not speak_text:
+            return False, "empty_text"
+
+        try:
+            audio = await tts_with_key_rotation(
+                api_keys=eleven_keys,
+                req=ElevenLabsTTSRequest(
+                    voice_id=voice_profile.voice_id,
+                    text=speak_text,
+                    model_id=voice_profile.model_id,
+                    output_format=voice_profile.output_format,
+                    voice_settings=voice_profile.voice_settings,
+                ),
+            )
+        except Exception as exc:
+            return False, f"tts_failed:{type(exc).__name__}"
+
+        tmp_path = None
+        try:
+            f = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+            tmp_path = f.name
+            f.write(audio)
+            f.flush()
+            f.close()
+
+            if vc.is_playing():
+                vc.stop()
+
+            def _after_play(err: Exception | None):
+                try:
+                    if tmp_path and os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+
+            source = discord.FFmpegPCMAudio(tmp_path)
+            vc.play(source, after=_after_play)
+            return True, "ok"
+        except Exception as exc:
+            try:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            return False, f"play_failed:{type(exc).__name__}"
+
+    async def _ensure_voice_connected(interaction: discord.Interaction) -> tuple[discord.VoiceClient | None, str]:
+        if interaction.guild is None:
+            return None, "This command can only be used in a server."
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        voice_state = getattr(member, "voice", None) if member else None
+        channel = getattr(voice_state, "channel", None)
+        if channel is None or not isinstance(channel, discord.VoiceChannel):
+            return None, "Join a voice channel first, then run /join_voice."
+
+        existing = _voice_client_for_guild(interaction.guild)
+        try:
+            if existing and existing.is_connected():
+                if existing.channel and existing.channel.id != channel.id:
+                    await existing.move_to(channel)
+                return existing, "ok"
+
+            vc = await channel.connect(self_deaf=True)
+            return vc, "ok"
+        except Exception as exc:
+            return None, f"Failed to connect to voice: {type(exc).__name__}"
+
+    @tree.command(
+        name="join_voice",
+        description="Make this bot join your current voice channel",
+        guild=guild_obj,
+    )
+    async def join_voice(interaction: discord.Interaction):
+        vc, msg = await _ensure_voice_connected(interaction)
+        if vc is None:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+        await interaction.response.send_message(f"Joined voice: {getattr(vc.channel, 'name', 'voice')}", ephemeral=True)
+
+    @tree.command(
+        name="leave_voice",
+        description="Make this bot leave the current voice channel",
+        guild=guild_obj,
+    )
+    async def leave_voice(interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        vc = _voice_client_for_guild(interaction.guild)
+        if not vc or not vc.is_connected():
+            await interaction.response.send_message("I'm not in a voice channel.", ephemeral=True)
+            return
+
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
+        await interaction.response.send_message("Left the voice channel.", ephemeral=True)
+
+    @tree.command(
+        name="startspeak",
+        description="Enable voice-channel speaking for this bot (must /join_voice first)",
+        guild=guild_obj,
+    )
+    async def startspeak(interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        vc = _voice_client_for_guild(interaction.guild)
+        if not vc or not vc.is_connected():
+            await interaction.response.send_message("I'm not in a voice channel. Use /join_voice first.", ephemeral=True)
+            return
+
+        runtime.guild_voice_chat_enabled[interaction.guild.id] = True
+        await interaction.response.send_message(
+            "OK — I'll speak my chat replies in this voice channel until you use /stopspeak.",
+            ephemeral=True,
+        )
+
+    @tree.command(
+        name="stopspeak",
+        description="Disable voice-channel speaking for this bot",
+        guild=guild_obj,
+    )
+    async def stopspeak(interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        runtime.guild_voice_chat_enabled[interaction.guild.id] = False
+        await interaction.response.send_message("OK — I won't speak my replies in voice anymore.", ephemeral=True)
 
     @tree.command(
         name="voice_next",
@@ -905,6 +1078,24 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
         if sent is None:
             sent = await message.channel.send(reply)
         history.append({"role": "assistant", "content": reply})
+
+        # If voice-chat mode is enabled, speak this reply in the joined voice channel.
+        try:
+            if message.guild and runtime.guild_voice_chat_enabled.get(message.guild.id, False):
+                ok, why = await _play_tts_in_voice(
+                    guild=message.guild,
+                    text=reply,
+                    voice_profile=voice_profile,
+                )
+                if not ok:
+                    # Report only in energy channel.
+                    energy_channel = client.get_channel(config.energy_channel_id)
+                    if energy_channel and isinstance(energy_channel, discord.abc.Messageable):
+                        await energy_channel.send(
+                            f"[{bot_name}] Voice-channel speak failed: {why} (use /join_voice then /startspeak; ffmpeg required)"
+                        )
+        except Exception:
+            pass
 
         # Persist this bot's reply as an assistant turn.
         try:
