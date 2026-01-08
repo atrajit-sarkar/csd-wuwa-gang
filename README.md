@@ -94,3 +94,17 @@ Commands (run in the server):
 - `/leave_voice` — bot leaves voice
 - `/startspeak` — bot will speak its chat replies in voice (you must `/join_voice` first)
 - `/stopspeak` — bot stops speaking chat replies in voice
+
+## Discord privileged intents (deployment fix)
+
+If you see `discord.errors.PrivilegedIntentsRequired`, at least one bot application is requesting a privileged intent (most commonly `MESSAGE CONTENT INTENT`) that is not enabled in the Discord Developer Portal for that bot.
+
+Recommended fix (keeps normal chat replies working):
+
+- Discord Developer Portal → your Application → **Bot** → enable **MESSAGE CONTENT INTENT**.
+- Do this for **each** bot application/token you run (Admin + each character bot).
+
+Temporary workaround (connect without message content):
+
+- Set `DISCORD_MESSAGE_CONTENT_INTENT=0` for character bots.
+- Set `DISCORD_MESSAGE_CONTENT_INTENT_ADMIN=0` for admin bot (default is `0`).

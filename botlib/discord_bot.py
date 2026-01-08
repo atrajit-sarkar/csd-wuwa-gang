@@ -26,6 +26,13 @@ from .voice_models import load_elevenlabs_voice_profile_for_character
 from .voice_router import decide_voice_vs_text, should_allow_voice, user_explicitly_wants_voice
 
 
+def _env_truthy(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class BotRuntime:
     channel_history: dict[tuple[int, int], Deque[dict[str, str]]]
@@ -351,7 +358,10 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
     system_prompt = make_system_prompt(character_block=character_block, overall_behaviour_lines=overall_behaviour_lines)
 
     intents = discord.Intents.default()
-    intents.message_content = True
+    # NOTE: message_content is a privileged intent. If it's not enabled in the Discord
+    # Developer Portal for this bot application, Discord will close the connection with
+    # PrivilegedIntentsRequired.
+    intents.message_content = _env_truthy("DISCORD_MESSAGE_CONTENT_INTENT", True)
     intents.guilds = True
     intents.messages = True
     intents.voice_states = True
@@ -1117,7 +1127,16 @@ async def run_character_bot(*, bot_name: str, character_name: str, token_env: st
             maybe_resummarize_channel_memory(guild_id=message.guild.id, channel_id=message.channel.id, user_id=message.author.id)
         )
 
-    await client.start(config.discord_token)
+    try:
+        await client.start(config.discord_token)
+    except discord.PrivilegedIntentsRequired as e:
+        want_message_content = bool(intents.message_content)
+        raise RuntimeError(
+            f"[{bot_name}] Privileged intents are not enabled for this bot application. "
+            f"Requested message_content={want_message_content}. "
+            f"Fix: Discord Developer Portal -> Application -> Bot -> enable 'MESSAGE CONTENT INTENT' "
+            f"for THIS bot, then restart. Temporary workaround: set DISCORD_MESSAGE_CONTENT_INTENT=0."
+        ) from e
 
 
 def main(*, bot_name: str, character_name: str, token_env: str = "BOT_TOKEN") -> None:

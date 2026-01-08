@@ -12,6 +12,15 @@ from .firestore_keys import FirestoreKeyStore
 from .channel_memory import FirestoreChannelMemoryStore
 
 
+def _env_truthy(name: str, default: bool) -> bool:
+    import os
+
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _parse_keys_arg(text: str) -> list[str]:
     # Accept comma-separated keys, ignoring empties.
     return [k.strip() for k in text.split(",") if k and k.strip()]
@@ -51,7 +60,8 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
     character_bot_names = _load_character_bot_names()
 
     intents = discord.Intents.default()
-    intents.message_content = True
+    # message_content is a privileged intent; admin bot doesn't need it for slash commands.
+    intents.message_content = _env_truthy("DISCORD_MESSAGE_CONTENT_INTENT_ADMIN", False)
     intents.guilds = True
     intents.messages = True
     intents.dm_messages = True
@@ -442,7 +452,16 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
             f"Thanks. Stored {stats.get('added', 0)} key(s) (skipped {stats.get('skipped', 0)} duplicate(s))."
         )
 
-    await client.start(config.discord_token)
+    try:
+        await client.start(config.discord_token)
+    except discord.PrivilegedIntentsRequired as e:
+        want_message_content = bool(intents.message_content)
+        raise RuntimeError(
+            f"[{bot_name}] Privileged intents are not enabled for this bot application. "
+            f"Requested message_content={want_message_content}. "
+            f"Fix: Discord Developer Portal -> Application -> Bot -> enable 'MESSAGE CONTENT INTENT' "
+            f"for THIS bot, then restart. Temporary workaround: set DISCORD_MESSAGE_CONTENT_INTENT_ADMIN=0."
+        ) from e
 
 
 def main(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_TOKEN") -> None:
