@@ -27,6 +27,20 @@ Note: by default, `.env` will NOT override existing process environment variable
 
 - `python run_all.py`
 
+## Reset Firestore (start fresh)
+
+This project stores per-user memory and API keys in Firestore under `FIRESTORE_COLLECTION` (default `wuwa-gang`).
+
+To wipe that collection (including nested subcollections like `recent_messages`) so the bots restart from a clean slate:
+
+- Dry run (shows target project + collection): `python tools/wipe_firestore.py`
+- Actually delete: `python tools/wipe_firestore.py --yes`
+
+Notes:
+
+- Uses `.env` + `FIREBASE_CREDENTIALS_PATH` (default `service.json`) to pick the Firebase project.
+- This is destructive; it deletes *everything* under the configured collection.
+
 ## Add more API keys
 
 API keys are stored in Firestore (not in `.env`).
