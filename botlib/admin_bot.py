@@ -9,7 +9,6 @@ from discord import app_commands
 
 from .config import load_config
 from .firestore_keys import FirestoreKeyStore
-from .channel_memory import FirestoreChannelMemoryStore
 
 
 def _env_truthy(name: str, default: bool) -> bool:
@@ -274,6 +273,13 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
             await interaction.response.send_message("Admins only.", ephemeral=True)
             return
 
+        # This can take a few seconds; acknowledge the interaction promptly.
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            # If already responded, we'll fall back to followups where possible.
+            pass
+
         # Announce in the target channel and use that message as a cutoff marker.
         cutoff_message_id: int | None = None
         try:
@@ -287,55 +293,76 @@ async def run_admin_bot(*, bot_name: str = "Admin", token_env: str = "ADMIN_BOT_
         except Exception:
             cutoff_message_id = None
 
-        # Clear per-bot memories so bots don't leak context into each other.
-        cleared: list[str] = []
-        failed: list[str] = []
-        for name in (character_bot_names or []):
-            try:
-                store = FirestoreChannelMemoryStore(
-                    credentials_path=config.firebase_credentials_path,
-                    collection=config.firestore_collection,
-                    bot_key=name,
-                )
-                await asyncio.to_thread(
-                    store.clear_all_user_memories,
-                    guild_id=config.guild_id,
-                    channel_id=config.target_channel_id,
-                    cutoff_message_id=cutoff_message_id,
-                )
-                cleared.append(name)
-            except Exception:
-                failed.append(name)
+        # Use the Firestore wipe tool to remove all channel_memory_* docs for this channel.
+        # This intentionally avoids touching admin keys (Ollama/ElevenLabs).
+        from asyncio.subprocess import PIPE
 
-        if not character_bot_names:
-            # Fallback: clear at least one store name to avoid command being a no-op.
+        tools_root = Path(__file__).resolve().parents[1] / "tools"
+        script_path = tools_root / "wipe_firestore.py"
+        if not script_path.exists():
+            msg = f"wipe_firestore.py not found at: {script_path}"
             try:
-                store = FirestoreChannelMemoryStore(
-                    credentials_path=config.firebase_credentials_path,
-                    collection=config.firestore_collection,
-                    bot_key="default",
-                )
-                await asyncio.to_thread(
-                    store.clear_all_user_memories,
-                    guild_id=config.guild_id,
-                    channel_id=config.target_channel_id,
-                    cutoff_message_id=cutoff_message_id,
-                )
-                cleared.append("default")
+                await interaction.followup.send(msg, ephemeral=True)
             except Exception:
-                failed.append("default")
-
-        if failed and not cleared:
-            await interaction.response.send_message(
-                f"Failed to clear channel memory for any bot. (cutoff={cutoff_message_id or 'none'})",
-                ephemeral=True,
-            )
+                await interaction.channel.send(msg)
             return
 
-        await interaction.response.send_message(
-            f"Cleared per-bot channel memory for target channel id: {config.target_channel_id} (cutoff={cutoff_message_id or 'none'}). Cleared: {', '.join(cleared) or 'none'}. Failed: {', '.join(failed) or 'none'}.",
-            ephemeral=True,
+        import sys
+
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--yes",
+            "--env",
+            str(config.env_path),
+            "--credentials",
+            str(config.firebase_credentials_path),
+            "--collection",
+            str(config.firestore_collection),
+            "--admin-keys-doc",
+            str(config.firestore_admin_keys_doc),
+            "--guild-id",
+            str(int(config.guild_id)),
+            "--channel-id",
+            str(int(config.target_channel_id)),
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
+            out_b, err_b = await proc.communicate()
+            out = (out_b or b"").decode("utf-8", errors="replace").strip()
+            err = (err_b or b"").decode("utf-8", errors="replace").strip()
+        except Exception as exc:
+            msg = f"Failed to run wipe tool: {type(exc).__name__}: {exc} (cutoff={cutoff_message_id or 'none'})"
+            try:
+                await interaction.followup.send(msg, ephemeral=True)
+            except Exception:
+                await interaction.channel.send(msg)
+            return
+
+        if proc.returncode != 0:
+            msg = (
+                f"Wipe tool failed (exit={proc.returncode}). (cutoff={cutoff_message_id or 'none'})\n"
+                + (f"stderr:\n{err}\n" if err else "")
+                + (f"stdout:\n{out}\n" if out else "")
+            )
+            try:
+                await interaction.followup.send(msg[:1900], ephemeral=True)
+            except Exception:
+                await interaction.channel.send(msg[:1900])
+            return
+
+        msg = (
+            f"Cleared channel memory docs for target channel id: {config.target_channel_id} "
+            f"(cutoff={cutoff_message_id or 'none'})."
         )
+        if out:
+            msg += "\n" + out
+
+        try:
+            await interaction.followup.send(msg[:1900], ephemeral=True)
+        except Exception:
+            await interaction.channel.send(msg[:1900])
 
     @tree.command(name="submit_energy", description="Submit your Ollama API keys via DM (comma separated)")
     @app_commands.describe(keys="Comma separated API keys")
